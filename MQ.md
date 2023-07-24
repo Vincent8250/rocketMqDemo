@@ -537,6 +537,86 @@ public String tagSend(@PathVariable String msg) {
 }
 ~~~
 
+###### 事务消息
+
+RocketMQTemplate中没有实现事务消息 所以下面使用TransactionMQProducer实现事务消息
+
+~~~java
+throw new RuntimeException("sendMessageInTransaction not implement, please use TransactionMQProducer class");
+~~~
+
+事务消息中最重要的是事务监听器的实现 -> TransactionListener
+executeLocalTransaction - > 在发送half消息后调用 执行本地事务  如果本地事务执行成功 RocketMQ再提交消息
+checkLocalTransaction - > 用于检查事务是否执行成功 RocketMQ 依赖此方法做补偿
+
+事务消息原理：**通过内部的两个 Topic 来实现对消息的两阶段支持**
+
+- prepare：将消息（消息带有事务标识）投递到一个名为 **RMS_SYS_TRANS_HALF_TOPIC** 的topic中
+  而不是投递到真正的 topic 中
+- commit rollback：生产者再通过TransactionListener的executeLocalTransaction()执行本地事务
+  事务处理成功或失败后  生产者producer会向broker发送commit或者rollback命令
+  - 如果是commit会将消息投递到真实的topic中
+    然后再投递一个表示删除的消息到RMS_SYS_TRANS_HALF_TOPIC中表示当前事务完成
+  - 如果是 rollback 则只需投递表示删除的消息即可
+
+~~~java
+@GetMapping("/transactionSend")
+public String transactionSend() throws MQClientException {
+    //自定义接收RocketMQ回调的监听接口
+    TransactionListener transactionListener = new TransactionListener() {
+        //如果half消息发送成功了，就会回调这个方法，执行本地事务
+        @Override
+        public LocalTransactionState executeLocalTransaction(org.apache.rocketmq.common.message.Message message, Object o) {
+            // 执行订单本地业务，并根据结构返回commit/rollback
+            try {
+                // 本地事务执行异常
+                //throw new Exception();
+
+                // 本地事务执行成功 返回commit
+                // 本地事务逻辑 添加订单 发货之类
+                return LocalTransactionState.COMMIT_MESSAGE;
+            } catch (Exception e) {
+                // 本地事务执行失败，返回rollback,作废half消息
+                return LocalTransactionState.ROLLBACK_MESSAGE;
+            }
+        }
+
+        //如果没有正确返回commit或rollback，会执行此方法
+        @Override
+        public LocalTransactionState checkLocalTransaction(MessageExt messageExt) {
+            // 查询本地事务是否已经成功执行了,再次根据结果返回commit/rollback
+            try {
+                // 本地事务执行成功，返回commit
+                System.out.println("查询本地事务 事务成功 返回成功");
+                return LocalTransactionState.COMMIT_MESSAGE;
+            } catch (Exception e) {
+                System.out.println("查询本地事务 事务失败 返回成功");
+                // 本地事务执行失败，返回rollback,作废half消息
+                return LocalTransactionState.ROLLBACK_MESSAGE;
+            }
+        }
+    };
+
+    TransactionMQProducer transactionMQProducer = new TransactionMQProducer();
+    transactionMQProducer.setNamesrvAddr("127.0.0.1:9876");// nameserver
+    transactionMQProducer.setProducerGroup("producer-test-group");// 生产组
+    transactionMQProducer.setTransactionListener(transactionListener);// 设置监听
+    transactionMQProducer.start();
+
+    // 消息主体
+    org.apache.rocketmq.common.message.Message message = new org.apache.rocketmq.common.message.Message();
+    message.setTopic(TOPIC);
+    message.setTags("String");
+    message.setBody("-----测试事务消息----".getBytes());
+
+    // 投递事务消息
+    transactionMQProducer.sendMessageInTransaction(message, null);
+
+    transactionMQProducer.shutdown();
+    return "message transactionSend";
+}
+~~~
+
 
 
 

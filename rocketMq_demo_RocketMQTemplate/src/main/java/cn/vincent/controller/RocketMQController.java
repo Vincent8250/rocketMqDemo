@@ -3,9 +3,9 @@ package cn.vincent.controller;
 import cn.hutool.core.util.IdUtil;
 import cn.vincent.vo.MessageBody;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.rocketmq.client.producer.SendCallback;
-import org.apache.rocketmq.client.producer.SendResult;
-import org.apache.rocketmq.client.producer.SendStatus;
+import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.client.producer.*;
+import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.apache.rocketmq.spring.support.DelayMode;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -168,17 +168,16 @@ public class RocketMQController {
         return "message batch!";
     }
 
-    // 事务消息
-
-    // 流量控制
-
-    // 消息过滤
     String[] TAGS = {"Message_01", "Message_02"};
-
     //关于消息过滤 Tag的设置 需要注意 在rocketmq中 一个消费组只能有一个Tag
     //所以要实现消息过滤 需要在不同的消费组中设置不同的Tag
     //PS：rocketMQTemplate中Tag的设置是通过topic设置的 格式为：topic:tag
     //默认tag是* 代表所有 不过滤
+    /**
+     * 消息过滤
+     * @param msg
+     * @return
+     */
     @GetMapping("/tagSend/{msg}")
     public String tagSend(@PathVariable String msg) {
         for (int i = 0; i < 10; i++) {
@@ -187,6 +186,67 @@ public class RocketMQController {
         }
         return "message tagSend";
     }
+
+    /**
+     * 事务消息
+     * @return
+     * @throws MQClientException
+     */
+    @GetMapping("/transactionSend")
+    public String transactionSend() throws MQClientException {
+        //自定义接收RocketMQ回调的监听接口
+        TransactionListener transactionListener = new TransactionListener() {
+            //如果half消息发送成功了，就会回调这个方法，执行本地事务
+            @Override
+            public LocalTransactionState executeLocalTransaction(org.apache.rocketmq.common.message.Message message, Object o) {
+                // 执行订单本地业务，并根据结构返回commit/rollback
+                try {
+                    // 本地事务执行异常
+                    //throw new Exception();
+
+                    // 本地事务执行成功 返回commit
+                    // 本地事务逻辑
+                    return LocalTransactionState.COMMIT_MESSAGE;
+                } catch (Exception e) {
+                    // 本地事务执行失败，返回rollback,作废half消息
+                    return LocalTransactionState.ROLLBACK_MESSAGE;
+                }
+            }
+
+            //如果没有正确返回commit或rollback，会执行此方法
+            @Override
+            public LocalTransactionState checkLocalTransaction(MessageExt messageExt) {
+                // 查询本地事务是否已经成功执行了,再次根据结果返回commit/rollback
+                try {
+                    // 本地事务执行成功，返回commit
+                    System.out.println("查询本地事务 事务成功 返回成功");
+                    return LocalTransactionState.COMMIT_MESSAGE;
+                } catch (Exception e) {
+                    System.out.println("查询本地事务 事务失败 返回成功");
+                    // 本地事务执行失败，返回rollback,作废half消息
+                    return LocalTransactionState.ROLLBACK_MESSAGE;
+                }
+            }
+        };
+
+        TransactionMQProducer transactionMQProducer = new TransactionMQProducer();
+        transactionMQProducer.setNamesrvAddr("127.0.0.1:9876");
+        transactionMQProducer.setProducerGroup("producer-test-group");
+        transactionMQProducer.setTransactionListener(transactionListener);
+        transactionMQProducer.start();
+
+        org.apache.rocketmq.common.message.Message message = new org.apache.rocketmq.common.message.Message();
+        message.setTopic(TOPIC);
+        message.setTags("String");
+        message.setBody("-----测试事务消息----".getBytes());
+
+        transactionMQProducer.sendMessageInTransaction(message, null);
+
+        transactionMQProducer.shutdown();
+        return "message transactionSend";
+    }
+
+    // 流量控制
 
     // 消息重试
 
