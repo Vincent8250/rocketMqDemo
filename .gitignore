@@ -1,3 +1,5 @@
 /rocketMq_demo.iml
 /.idea/
 /target/
+/rocketMq_demo_Basics/target/
+/rocketMq_demo_RocketMQTemplate/target/
