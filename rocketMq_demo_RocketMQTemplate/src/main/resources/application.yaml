@@ -1,0 +1,9 @@
+server:
+  port: 9001
+
+rocketmq:
+  name-server: 127.0.0.1:9876
+  producer:
+    group: producer-test-group
+#    retry-times-when-send-failed: 5 # 消息发送失败重试次数,默认为2
+#    retry-times-when-send-async-failed: 5 # 异步消息发送失败重试次数,默认为2
