@@ -164,7 +164,7 @@ start D:\jobsoft\cloud\rocketmq\bin\mqbroker.cmd -n 127.0.0.1:9876 autoCreateTop
 
 ### 消息种类
 
-##### 按照发送分类：
+#### 按照发送分类
 
 - 同步消息：发送方发出数据后  **会阻塞直到MQ服务方发回响应消息**
   应用场景：例如重要通知邮件、报名短信通知、营销短信系统等（）
@@ -173,7 +173,7 @@ start D:\jobsoft\cloud\rocketmq\bin\mqbroker.cmd -n 127.0.0.1:9876 autoCreateTop
 - 单向消息：只负责发送消息  不等待服务器回应且没有回调函数触发
   应用场景：适用于某些耗时非常短  但对可靠性要求并不高的场景  例如日志收集
 
-##### 按照功能分类：
+#### 按照功能分类
 
 - 普通消息
 - 顺序消息
@@ -668,6 +668,163 @@ public class RocketMessageBodyListener implements RocketMQListener<MessageBody> 
 ### 集群搭建
 
 #### 高可用 - Dledger
+
+
+
+
+
+### 高级特性
+
+#### 工作流程
+
+1. 启动NameServer,NameServer启动后开始监听端口 等待broker、producer、consumer连接
+
+2. 启动broker时 broker会和所有的NameServer建立并保持长链接  然后每隔30s向NameServer定时发送心跳包
+
+3. 发送消息前 可以先创建Topic
+   创建Topic时需要指定该topic要存储在哪些broker上 同时也会将topic和broker的关系写入到NameServer
+   不过这步并不是必需的 也可以在发送消息时自动创建topic
+
+   手动创建Topic有两种模式：
+
+      1）集群模式：该模式下创建的Topic在该集群中，所有Broker的Queue数量是相同的。
+
+      2）Broker模式：该模式下创建的Topic在该集群中，每个Broker的Queue数量可以不同。
+
+   自动创建Topic时，默认采用Broker模式，会为每个Broker默认创建4个Queue
+
+4. producer发送消息 启动时与NameServer集群中的其中一台建立长链接 并从NameServer中获取路由信息 即Topic和Queue与Broker的地址(IP+Port)的映射关系 
+   然后根据算法策略从队列选择一个Queue与队列所在的broker建立长链接从而向broker发送消息 
+   在获取到路由信息后 Producer会首先将路由信息缓存到本地 再每隔30s从NameServer更新一个路由信息
+
+5. Consumer和NameServer建立长链接 获取其所订阅的Topic信息 然后根据算法策略从路由信息中获取到所要消费的Queue然后和broker建立长链接 开始消费其中的消息 Consumer在获取到路由信息后 也会每隔30s从NameServer更新一次路由信息 
+   不过和Producer不同的是 Consumer还会向Broker发送心跳 以确保Broker的存活状态·
+
+
+
+
+
+
+
+#### 存储结构
+
+![image-20230725135801904](img/image-20230725135801904.png)
+
+
+
+
+
+
+
+### 面试整理
+
+- RocketMQ Broker中的消息被消费后会立即删除吗？
+  不会 每条消息都会持久化到CommitLog中 每个Consumer连接到Broker后会维持消费进度信息
+  当有消息消费后 只是当前Consumer的消费进度（CommitLog的offset）更新了 不会删除
+  清理机制是默认72小时后会删除不再使用的CommitLog文件
+- RocketMQ消费模式有几种？
+  集群消费：一条消息只会被同Group中的一个Consumer消费 多个Group可以多次消费
+  广播消费：Group中所有订阅的Consumer实例都消费一遍
+- 消费消息是push还是pull？
+  RocketMQ没有真正意义的push 都是pull
+  虽然有push类 但实际底层实现采用的是长轮询机制 即拉取方式
+- 为什么要主动拉取消息而不使用事件监听方式？
+  如果broker主动推送消息的话有可能push速度快 消费速度慢的情况 那么就会造成消息在consumer端堆积过多 同时又不能被其他consumer消费的情况
+  而pull的方式可以根据当前自身情况来pull 不会造成过多的压力而造成瓶颈 所以采取了pull的方式
+- broker如何处理拉取请求的？
+  Consumer首次请求Broker Broker中是否有符合条件的消息
+  - 有 ->响应Consumer 等待下次Consumer的请求
+  - 没有 ->PullRequestHoldService来Hold连接 每个5s执行一次检查pullRequestTable有没有消息 有的话立即推送
+    每隔1ms检查commitLog中是否有新消息 有的话写入到pullRequestTable 当有新消息的时候返回请求
+    挂起consumer的请求 即不断开连接也不返回数据使用consumer的offset
+- RocketMQ如何做负载均衡？
+  - producer发送消息的负载均衡：默认会轮询向Topic的所有queue发送消息 以达到消息平均落到不同的queue上
+    而由于queue可以落在不同的broker上 就可以发到不同broker上（当然也可以指定发送到某个特定的queue上）
+  - consumer订阅消息的负载均衡：假设有5个队列 两个消费者 则第一个消费者消费3个队列 第二个则消费2个队列 以达到平均消费的效果
+    而需要注意的是 当consumer的数量大于队列的数量的话 根据rocketMq的机制 多出来的Consumer不会去消费数据
+    因此建议consumer的数量小于或者等于queue的数量避免不必要的浪费
+- 消息重复消费？
+  影响消息正常发送和消费的重要原因是网络的不确定性
+  - 原因
+    - ACK问题：正常情况下在consumer真正消费完消息后应该发送ack，通知broker该消息已正常消费，从queue中剔除
+      当ack因为网络原因无法发送到broker，broker会认为此条消息没有被消费，此后会开启消息重投机制把消息再次投递到consumer
+    - 消费模式：在CLUSTERING模式下，消息在broker中会保证相同group的consumer消费一次，但是针对不同group的consumer会推送多次
+  - 解决方法：
+    - 去重操作直接放在了消费端 消费端处理消息的业务逻辑保持幂等性
+    - 数据库表记录消息主键
+- 如何让RocketMQ保证消息的顺序消费？
+  多个queue只能保证单个queue里的顺序
+- 怎么保证消息发到同一个queue？
+  如果是rocketMQTemplate的话直接设置key就行
+  如果是原生的api的话 就要自己实现选择算法
+- RocketMQ如何保证消息不丢失？
+  - Producer端如何保证消息不丢失
+    采取send()同步发消息 发送结果是同步感知的 发送失败后可以重试 设置重试次数 默认3次
+    producer.setRetryTimesWhenSendFailed(10);
+    集群部署 比如发送失败了的原因可能是当前Broker宕机了 重试的时候会发送到其他Broker上
+  - Broker端如何保证消息不丢失
+    修改刷盘策略为同步刷盘 默认情况下是异步刷盘的
+    flushDiskType = SYNC_FLUSH
+    集群部署 主从模式 高可用
+  - Consumer端如何保证消息不丢失
+    完全消费正常后在进行手动ack确认
+- 堆积时间过长消息超时了？
+  RocketMQ中的消息只会在commitLog被删除的时候才会消失 不会超时 也就是说未被消费的消息不会存在超时删除这情况
+- 堆积的消息会不会进死信队列？
+  不会 消息在消费失败后会进入重试队列（%RETRY%+ConsumerGroup）16次 才会进入死信队列（%DLQ%+ConsumerGroup）
+- RocketMQ在分布式事务支持这块机制的底层原理?
+  Half Message：预处理消息 当broker收到半消息后 会存储到RMQ_SYS_TRANS_HALF_TOPIC的topic消息队列中
+  本地事务逻辑处理成功 消息会从RMQ_SYS_TRANS_HALF_TOPIC中放到真正的目标topic消息队列中
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
