@@ -70,7 +70,7 @@ start D:\jobsoft\cloud\rocketmq\bin\mqbroker.cmd -n 127.0.0.1:9876 autoCreateTop
 
 ##### rocketMQ模型
 
-![image-20230717103322273](img/image-20230717103322273.png)
+![image-20230731104737026](img/image-20230731104737026.png)
 
 1. NameServer：提供轻量级的服务发现和路由
    每个 NameServer 记录完整的路由信息  提供等效的读写服务  并支持快速存储扩展
@@ -80,6 +80,14 @@ start D:\jobsoft\cloud\rocketmq\bin\mqbroker.cmd -n 127.0.0.1:9876 autoCreateTop
    拥有相同 Producer Group 的 Producer 组成一个集群
 4. Consumer：消费者 接收消息进行消费的实例
    拥有相同 Consumer Group 的Consumer 组成一个集群
+
+
+
+##### 集群模型
+
+![image-20230717103322273](img/image-20230717103322273.png)
+
+
 
 
 
@@ -101,27 +109,6 @@ start D:\jobsoft\cloud\rocketmq\bin\mqbroker.cmd -n 127.0.0.1:9876 autoCreateTop
 4. consumer消费者连接nameserver  根据broker分配的Queue来消费数据
 
 ![image-20230717140653331](img/image-20230717140653331.png)
-
-##### 消息重试
-
-默认重试16次
-
-
-
-##### 死信队列
-
-重试16次后 加入死信队列
-
-
-
-##### 消息幂等
-
-主要可能因为网络波动、业务重试等原因 造成消息重复问题
-
-###### 解决方案
-
-- 生产者：
-- 消费者：
 
 
 
@@ -222,35 +209,6 @@ Java中所有的发布方法
 
 
 
-
-
-阶段一：入门基础
-
-1. 学习消息队列基础知识，了解消息队列的概念和应用场景。
-2. 了解 RocketMQ 的整体架构和核心组件，学习 RocketMQ 的设计理念。
-3. 安装和配置 RocketMQ，学习如何启动和停止 RocketMQ 集群。
-4. 使用 RocketMQ 控制台创建 topic、producer 和 consumer，学习如何发送和接收消息。
-
-阶段二：进阶学习
-
-1. 学习如何使用 Java 客户端 API 发送和接收消息。
-2. 学习 RocketMQ 的高级特性，例如事务消息、延迟消息、顺序消息等。
-3. 学习如何使用 RocketMQ 的重试机制来保证消息的可靠性。
-4. 学习如何使用 RocketMQ 的过滤功能来消费指定类型的消息。
-5. 学习如何使用 RocketMQ 的监控和报警功能，进行消息队列的监控和管理。
-6. 学习如何使用 RocketMQ 的批量发送和消费功能，提高消息发送和消费的效率。
-
-阶段三：实战应用
-
-1. 学习如何在 Spring Boot 中集成 RocketMQ。
-2. 实现一个简单的分布式任务调度系统，并使用 RocketMQ 作为消息队列。
-3. 实现一个简单的电商系统，使用 RocketMQ 实现订单系统和库存系统之间的消息交互。
-4. 学习如何在 RocketMQ 中使用消息过滤、重试机制和事务消息等高级特性，提高消息的可靠性和稳定性
-
-
-
-
-
 ### SpringBoot整合
 
 #### 基础案例
@@ -304,12 +262,15 @@ public class ConsumerService {
         consumer.setNamesrvAddr("localhost:9876");// 设置nameserver地址
         try {
             consumer.subscribe("TEST-0717-TOPIC", "TAG_0717");// 设置topic 和 tag过滤
+            consumer.setMaxReconsumeTimes(20);// 设置最大重试次数
             // 设置监听方法
             consumer.registerMessageListener((MessageListenerConcurrently) (msgs, context) -> {
                 for (MessageExt msg : msgs) {
                     System.out.println("TAG:TAG_0717 => Message Received: " + new String(msg.getBody()));
                 }
                 return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+                // 消费逻辑失败 稍后重试
+                //return ConsumeConcurrentlyStatus.RECONSUME_LATER;
             });
             consumer.start();
         } catch (MQClientException e) {
@@ -630,6 +591,7 @@ public String transactionSend() throws MQClientException {
         selectorExpression = "MessageBody",// tag
         consumerGroup = "consumer-group-messagebody",// 消费者组
         nameServer = "${rocketmq.name-server}",// nameserver
+        maxReconsumeTimes = 20,// 设置重试次数
         messageModel = MessageModel.CLUSTERING,// 设置消息模式 广播模式||集群模式
         consumeMode = ConsumeMode.ORDERLY // 设置消费模型 并发接受||有序接受
 )
@@ -677,6 +639,24 @@ public class RocketMessageBodyListener implements RocketMQListener<MessageBody> 
 
 #### 工作流程
 
+##### 大致流程
+
+1、消息生成者发送消息
+
+2、MQ收到消息，将消息进行持久化，在存储中新增一条记录
+
+3、返回ACK给生产者
+
+4、MQ push 消息给对应的消费者，然后等待消费者返回ACK
+
+5、如果消息消费者在指定时间内成功返回ack，那么MQ认为消息消费成功，在存储中删除消息，即执行第6步；如果MQ在指定时间内没有收到ACK，则认为消息消费失败，会尝试重新push消息,重复执行4、5、6步骤
+
+6、MQ删除消息
+
+
+
+##### 详细流程
+
 1. 启动NameServer,NameServer启动后开始监听端口 等待broker、producer、consumer连接
 
 2. 启动broker时 broker会和所有的NameServer建立并保持长链接  然后每隔30s向NameServer定时发送心跳包
@@ -706,13 +686,190 @@ public class RocketMessageBodyListener implements RocketMQListener<MessageBody> 
 
 
 
-#### 存储结构
+#### 消息存储
+
+##### 存储原理
+
+MQ有三种存储方式：文件存储、DB存储、分布式KV存储
+存储效率：文件系统>分布式KV存储>关系型数据库
+易用性：关系型数据库>分布式KV存储>文件系统
+
+RocketMQ采用的是磁盘操作的文件存储
+RocketMQ的消息用顺序写 保证了消息存储的速度（顺序写的磁盘操作是随机写的6000倍）
+
+
+
+##### 存储结构
+
+- CommitLog：该文件主要存储消息主体以及元数据的主体 单个文件大小默认1G
+  commitLog文件保存着所有的主题消息
+- ConsumeQueue：是为了高效检索主题消息 也可以说是CommitLog文件的索引
+  ConsumeQueue存储的不是消息本身 而是消息消费进度
+  - <img src="img/image-20230731170846736.png" alt="image-20230731170846736" style="zoom:50%;float:left;" />
+- MessageQueue：一个 Topic 默认对应四个 MessageQueue   MessageQueue跟Broker绑定
+  MessageQueue是为了数据分片而设计的（将Topic数据分片到多台Broker上）
+- Index：Hash 索引机制 rocketMQ也可以通过hash索引找到消息
+  为消息查询提供了一种通过key或时间区间来查询消息的方法
+  这种通过IndexFile来查找消息的方法不影响发送与消费消息的主流程
+
+##### 存储逻辑
 
 ![image-20230725135801904](img/image-20230725135801904.png)
 
 
 
+##### 刷盘机制
 
+###### 同步刷盘
+
+直到消息写入磁盘后 才返回成功
+
+###### 异步刷盘
+
+消息发送成功后 就返回成功 到达一定的数据量后一起写入磁盘
+
+
+
+#### 高可用机制
+
+RocketMQ分布式集群是通过Master和Slave的配合达到高可用性的
+Master角色的Broker支持读和写，Slave角色的Broker仅支持读
+
+Master和Slave的区别：在Broker的配置文件中，参数 brokerId的值为0表明这个Broker是Master，大于0表明这个Broker是 Slave，同时brokerRole参数也会说明这个Broker是Master还是Slave。
+
+##### 消费高可用
+
+在Consumer的配置文件中，并不需要设置是从Master读还是从Slave 读，当Master不可用或者繁忙的时候，Consumer会被自动切换到从Slave 读。有了自动切换Consumer这种机制，当一个Master角色的机器出现故障后，Consumer仍然可以从Slave读取消息，不影响Consumer程序。这就达到了消费端的高可用性。
+
+##### 发送高可用
+
+在创建Topic的时候 把Topic的多个Message Queue创建在多个Broker组上（相同Broker名称 不同 brokerId的机器组成一个Broker组）这样当一个Broker组的Master不可用后  其他组的Master仍然可用 Producer仍然可以发送消息
+**RocketMQ目前还不支持把Slave自动转成Master**  如果机器资源不足 需要把Slave转成Master 则要手动停止Slave角色的Broker  更改配置文件  用新的配置文件启动Broker
+
+
+
+##### 消息主从复制
+
+###### 同步复制
+
+同步复制方式是等Master和Slave均写 成功后才反馈给客户端写成功状态；
+在同步复制方式下，如果Master出故障， Slave上有全部的备份数据，容易恢复，但是同步复制会增大数据写入 延迟，降低系统吞吐量。
+
+###### 异步复制
+
+异步复制方式是只要Master写成功 即可反馈给客户端写成功状态。
+在异步复制方式下，系统拥有较低的延迟和较高的吞吐量，但是如果Master出了故障，有些数据因为没有被写 入Slave，有可能会丢失；
+
+###### 配置
+
+同步复制和异步复制是通过Broker配置文件里的brokerRole参数进行设置的，这个参数可以被设置成ASYNC_MASTER、 SYNC_MASTER、SLAVE三个值中的一个。
+
+
+
+#### 负载均衡
+
+##### 生产端 负载均衡
+
+Producer端，每个实例在发消息的时候，默认会轮询所有的message queue发送，以达到让消息平均落在不同的queue上。而由于queue可以散落在不同的broker，所以消息就发送到不同的broker下
+
+##### 消费端 负载均衡
+
+###### 集群模式
+
+每条消息只需要投递到订阅这个topic的Consumer Group下的一个实例即可
+集群模式下，queue都是只允许分配只一个消费者实例，这是由于如果多个实例同时消费一个queue的消息，由于拉取哪些消息是consumer主动控制的，那样会导致同一个消息在不同的实例下被消费多次，所以算法上都是一个queue只分给一个consumer实例，一个consumer实例可以允许同时分到不同的queue。
+
+###### 广播模式
+
+由于广播模式下要求一条消息需要投递到一个消费组下面所有的消费者实例，所以也就没有消息被分摊消费的说法。
+在实现上，其中一个不同就是在consumer分配queue的时候，所有consumer都分到所有的queue。
+
+
+
+#### 消息重试
+
+rocketMQ在Consumer启动时可以自定义重试次数 
+最大重试次数小于等于 16 次，则重试时间间隔同下表描述
+最大重试次数大于 16 次，超过 16 次的重试时间间隔均为每次 2 小时
+<img src="img/image-20230801140515776.png" alt="image-20230801140515776" style="zoom:50%;" />
+
+##### 顺序消息重试
+
+对于顺序消息，当消费者消费消息失败后，消息队列 RocketMQ 会自动不断进行消息重试（每次间隔时间为 1 秒），这时，应用会出现消息消费被阻塞的情况。因此，在使用顺序消息时，务必保证应用能够及时监控并处理消费失败的情况，避免阻塞现象的发生。
+
+##### 无序消息重试
+
+对于无序消息（普通、定时、延时、事务消息）当消费者消费消息失败时，您可以通过设置返回状态达到消息重试的结果。无序消息的重试只针对集群消费方式生效；广播方式不提供失败重试特性，即消费失败后，失败消息不再重试，继续消费新的消息。
+消息队列 RocketMQ 默认允许每条消息最多重试16次  如果消息重试16次后仍然失败 消息将不再投递
+
+##### 配置方法
+
+集群消费方式下，消息消费失败后期望消息重试，需要在消息监听器接口的实现中明确进行配置
+
+###### DefaultMQPushConsumer
+
+~~~java
+DefaultMQPushConsumer consumer = new DefaultMQPushConsumer("TAG_0721_Group");
+consumer.setMaxReconsumeTimes(20);// 设置最大重试次数
+~~~
+
+###### RocketMQListener
+
+~~~java
+@RocketMQMessageListener(
+        topic = "my-topic",
+        selectorType = SelectorType.TAG,
+        selectorExpression = "Message_01",
+        consumerGroup = "consumer-group-message_01",
+        nameServer = "${rocketmq.name-server}",
+        maxReconsumeTimes = 20,// 设置重试次数
+        messageModel = MessageModel.CLUSTERING,// 设置消息模式 广播模式||集群模式
+        consumeMode = ConsumeMode.ORDERLY // 设置消费模型 并发接受||有序接受
+)
+~~~
+
+
+
+
+
+
+
+
+
+#### 死信队列
+
+##### 概念
+
+死信消息：正常情况下无法被消费的消息
+
+死信队列：储存死信消息的队列 消息重试超过一定次数后（默认16次）就会被放到死信队列中
+
+可以在控制台Topic列表中看到“DLQ”相关的Topic，默认命名是：
+
+- %RETRY%消费组名称（重试Topic）
+- %DLQ%消费组名称（死信Topic）
+
+##### 特征
+
+1. 死信队列中的消息 不会再被消费者正常消费
+2. 有效期与正常消息相同均为3天 3天后会被自动删除 
+   因此 请在死信消息产生后的3天内及时处理
+
+
+
+#### 消息幂等
+
+##### 问题
+
+消息发送时重复：实际消息已经在服务器端完成了持久化 但ACK返回失败
+生产者会再次重试发送 且两条消息内容相同并且 Message ID 也相同
+
+消息消费时重复：实际消息已经消费完成 但ACK返回失败
+rocketmq为确保每条消息都被消费一次 会重试
+
+##### 方案
+
+rocketmq中的MessageID可能重复 所以最好的幂等处理是以业务唯一标识来处理
 
 
 
