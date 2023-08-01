@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
         selectorExpression = "Message_01",
         consumerGroup = "consumer-group-message_01",
         nameServer = "${rocketmq.name-server}",
+        maxReconsumeTimes = 20,// 设置重试次数
         messageModel = MessageModel.CLUSTERING,// 设置消息模式 广播模式||集群模式
         consumeMode = ConsumeMode.ORDERLY // 设置消费模型 并发接受||有序接受
 )
